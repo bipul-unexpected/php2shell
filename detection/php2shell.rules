@@ -1,0 +1,101 @@
+# php2shell — CVE-2026-109618 / CVE-2026-109619
+# Suricata 6/7 + Snort 3 compatible. Request-side rules cover the primary
+# `PHP_SESSION_UPLOAD_PROGRESS` vector shared by chains A, C, D and E.
+#
+# Deploy with:
+#   suricata -T -c /etc/suricata/suricata.yaml -S php2shell.rules
+#
+# False-positive note: some applications legitimately use upload progress.
+# Rule 1000031 is the low-noise one; start there, then tune 1000030 by asset.
+
+alert http any any -> any any (msg:"php2shell - PHP_SESSION_UPLOAD_PROGRESS in request body (CVE-2026-109618/109619)"; \
+  flow:to_server,established; http.request_body; \
+  content:"PHP_SESSION_UPLOAD_PROGRESS"; nocase; \
+  metadata:affected_product PHP, attack_target Web_Server, created_at 2026_10_21, cve CVE-2026-109618, cve CVE-2026-109619; \
+  classtype:web-application-attack; sid:1000030; rev:1;)
+
+alert http any any -> any any (msg:"php2shell - session.upload_progress name in multipart, non-tool UA"; \
+  flow:to_server,established; http.request_body; \
+  content:"PHP_SESSION_UPLOAD_PROGRESS"; nocase; \
+  content:"Content-Disposition"; nocase; distance:0; \
+  metadata:affected_product PHP, created_at 2026_10_21, cve CVE-2026-109618, cve CVE-2026-109619; \
+  classtype:web-application-attack; sid:1000031; rev:1;)
+
+alert http any any -> any any (msg:"php2shell - PHP code in multipart filename (session injection, chain A)"; \
+  flow:to_server,established; http.request_body; \
+  content:"filename="; nocase; \
+  content:"<?php"; nocase; distance:0; within:512; \
+  metadata:affected_product PHP, created_at 2026_10_21, cve CVE-2026-109618; \
+  classtype:web-application-attack; sid:1000032; rev:1;)
+
+alert http any any -> any any (msg:"php2shell - PHP short tag in multipart filename"; \
+  flow:to_server,established; http.request_body; \
+  content:"filename="; nocase; \
+  content:"<?"; distance:0; within:256; \
+  metadata:affected_product PHP, created_at 2026_10_21, cve CVE-2026-109618; \
+  classtype:web-application-attack; sid:1000033; rev:1;)
+
+alert http any any -> any any (msg:"php2shell - serialized object with pipe in multipart filename (chain C)"; \
+  flow:to_server,established; http.request_body; \
+  content:"filename="; nocase; \
+  content:"|O:"; distance:0; within:256; \
+  metadata:affected_product PHP, created_at 2026_10_21, cve CVE-2026-109619; \
+  classtype:web-application-attack; sid:1000034; rev:1;)
+
+alert http any any -> any any (msg:"php2shell - serialized object in multipart filename (chain C variant)"; \
+  flow:to_server,established; http.request_body; \
+  content:"filename="; nocase; \
+  content:"O:"; distance:0; within:128; \
+  content:":"; within:16; \
+  content:"{"; within:64; \
+  metadata:affected_product PHP, created_at 2026_10_21, cve CVE-2026-109619; \
+  classtype:web-application-attack; sid:1000035; rev:1;)
+
+alert http any any -> any any (msg:"php2shell - PHPSESSID supplied in POST body (session fixation primitive)"; \
+  flow:to_server,established; http.request_body; \
+  content:"Content-Disposition"; nocase; \
+  content:"PHPSESSID"; nocase; distance:0; within:128; \
+  metadata:affected_product PHP, created_at 2026_10_21, cve CVE-2026-109618; \
+  classtype:web-application-attack; sid:1000036; rev:1;)
+
+alert http any any -> any any (msg:"php2shell - chunked multipart without Content-Length (OOM bypass, chain D)"; \
+  flow:to_server,established; http.request_body; \
+  content:"Transfer-Encoding: chunked"; nocase; \
+  content:"multipart/form-data"; nocase; distance:0; \
+  metadata:affected_product PHP, created_at 2026_10_21, cve CVE-2026-109618; \
+  classtype:web-application-attack; sid:1000037; rev:1;)
+
+alert http any any -> any any (msg:"php2shell - oversized multipart header amplification (chain D/E)"; \
+  flow:to_server,established; http.request_body; \
+  content:"multipart/form-data"; nocase; \
+  pcre:"/X-[A-Za-z0-9\\-]+:[^\\r\\n]{400,}/R"; \
+  metadata:affected_product PHP, created_at 2026_10_21, cve CVE-2026-109618; \
+  classtype:web-application-attack; sid:1000038; rev:1;)
+
+# --- response side: confirms the stale-state paths actually fired ---
+
+alert http any any -> any any (msg:"php2shell - session decode failure on response (chain C/E indicator)"; \
+  flow:from_server,established; http.response_body; \
+  content:"Failed to decode session object"; nocase; \
+  metadata:affected_product PHP, created_at 2026_10_21, cve CVE-2026-109619; \
+  classtype:web-application-attack; sid:1000040; rev:1;)
+
+alert http any any -> any any (msg:"php2shell - session destruction failure on response (chain C/E indicator)"; \
+  flow:from_server,established; http.response_body; \
+  content:"Session object destruction failed"; nocase; \
+  metadata:affected_product PHP, created_at 2026_10_21, cve CVE-2026-109619; \
+  classtype:web-application-attack; sid:1000041; rev:1;)
+
+alert http any any -> any any (msg:"php2shell - OOM reported from Unknown on line 0 (SAPI-phase OOM)"; \
+  flow:from_server,established; http.response_body; \
+  content:"Allowed memory size"; nocase; \
+  content:"Unknown on line 0"; nocase; distance:0; within:200; \
+  metadata:affected_product PHP, created_at 2026_10_21, cve CVE-2026-109618; \
+  classtype:web-application-attack; sid:1000042; rev:1;)
+
+alert http any any -> any any (msg:"php2shell - vulnerable PHP version disclosed (8.2.x < 8.2.35 / 8.3.x < 8.3.36 / 8.4.x < 8.4.27 / 8.5.x < 8.5.12)"; \
+  flow:from_server,established; http.header; \
+  content:"X-Powered-By"; nocase; \
+  pcre:"/X-Powered-By:\s*PHP\/8\.(?:2\.(?:[0-9]|[12][0-9]|3[0-4])|3\.(?:[0-9]|[12][0-9]|3[0-5])|4\.(?:[0-9]|1[0-9]|2[0-6])|5\.(?:[0-9]|1[01]))/iH"; \
+  metadata:affected_product PHP, created_at 2026_10_21, cve CVE-2026-109618, cve CVE-2026-109619; \
+  classtype:attempted-recon; sid:1000043; rev:1;)
